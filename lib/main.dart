@@ -1,8 +1,10 @@
 /*
- * Oct 17-24, 2026
+ * Nov 2, 2026
+ * Since none of the earlier code changes fixed the iOS image handling, we are
+ * going to try file-based approach for storing the image file
  * This version still had issues with iOS capturing an image:
- * - Couple of differenet solution were applied between Oct 17- 20, but no luck
- * - The last cod changed is being applied on Oct 24th
+ * - Three differenet solutions were applied between Oct 17 - Nov 2, but no luck
+ * - The last code changes were being applied on Oct 24th
  * The .apk for this source was successfully uploaded to Firenase App hosting
  * This version seems to work fully on Pixel9a. More testing should be good
  * Uses Joel's latest GLY icon/image
@@ -49,6 +51,9 @@ import 'package:image/image.dart' as img;
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:syncfusion_flutter_gauges/gauges.dart';
 
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 late List<CameraDescription> _cameras;
 
 Future<void> main() async {
@@ -395,6 +400,7 @@ class NutritionScanner {
 
     if (imageResult == null) throw Exception("Image processing failed.");
 
+/***WAS
     // 2. Map the bytes using the precise format required by the host operating system
     final metadata = InputImageMetadata(
       size: Size(imageResult.width.toDouble(), imageResult.height.toDouble()),
@@ -410,6 +416,9 @@ class NutritionScanner {
       bytes: imageResult.platformBytes,
       metadata: metadata,
     );
+WAS***/
+    // Bypasses cross-platform raw byte channel serialization restrictions entirely
+    final inputImage = InputImage.fromFilePath(imageResult.imagePath);
 
     final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
     final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
@@ -646,14 +655,20 @@ class NutritionPipelineInput {
 class PlatformMemoryImageResult {
   final int width;
   final int height;
+/***WAS
   final Uint8List platformBytes;
   final int? iosBytesPerRow; // 👈 Add this optional field
+WAS***/
+  final String imagePath;
 
   PlatformMemoryImageResult({
     required this.width, 
     required this.height,
+/***WAS
     required this.platformBytes, 
     this.iosBytesPerRow, // 👈 Include it in the constructor
+WAS***/
+    required this.imagePath, 
   });
 }
 
@@ -719,6 +734,7 @@ Future<PlatformMemoryImageResult?> _runBackgroundEnhancements(NutritionPipelineI
   // STEP D: Cylindrical Flattening
   workingImage = _applyCylindricalFlattening(workingImage);
 
+/***WAS
   // STEP E: Cross-Platform Conditional Allocation (100% in RAM)
   Uint8List finalBytes;
   if (input.isAndroidPlatform) {
@@ -731,8 +747,45 @@ Future<PlatformMemoryImageResult?> _runBackgroundEnhancements(NutritionPipelineI
     width: workingImage.width,
     height: workingImage.height,
     platformBytes: finalBytes,
-    //BAD iosBytesPerRow: originalPlaneBytesPerRow, // 👈 Pass the native stride here
     iosBytesPerRow: workingImage.width * 4, 
+  );
+WAS***/
+  // 1. Fetch the system's temporary directory
+  final tempDir = await getTemporaryDirectory();
+
+  // 2. Define a persistent target file path to avoid storage accumulation
+  final targetPath = '${tempDir.path}/gltracker_processed_scan.jpg';
+
+
+  // 3. Compress your raw processed bytes directly from RAM into a JPEG file on disk
+  Uint8List processedBytes;
+
+  if (input.isAndroidPlatform) {
+    // Keep your working Android pipeline exactly as it is
+    processedBytes = _convertToNV21InMemory(workingImage);
+  } else {
+    // 👈 CHANGE FOR iOS: Encode to standard JPEG bytes directly from your matrix
+    // This bypasses the unaligned raw byte array entirely!
+    processedBytes = img.encodeJpg(workingImage, quality: 90); 
+  }
+
+  final Uint8List? compressedBytes = await FlutterImageCompress.compressWithList(
+    processedBytes, // 👈 Uses your actual in-memory byte array variable
+    quality: 90,
+    format: CompressFormat.jpeg,
+  );
+
+  // 4. Safely dump the compressed JPEG bytes to the flash storage filesystem
+  if (compressedBytes != null) {
+    final tempFile = File(targetPath);
+    await tempFile.writeAsBytes(compressedBytes);
+  }
+
+  // 5. Return the packaged file path out to the main UI thread
+  return PlatformMemoryImageResult(
+    width: workingImage.width,
+    height: workingImage.height,
+    imagePath: targetPath, // 👈 Send the absolute path out
   );
 }
 
