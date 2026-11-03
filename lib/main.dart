@@ -54,6 +54,7 @@ import 'package:syncfusion_flutter_gauges/gauges.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
+
 late List<CameraDescription> _cameras;
 
 Future<void> main() async {
@@ -389,14 +390,30 @@ class NutritionScanner {
   Future<DisplayInfo> analyzeBytes(Uint8List originalBytes) async {
     final bool isAndroid = defaultTargetPlatform == TargetPlatform.android;
 
+    // 1) DECLARE + INITIALIZE the rootToken variable on the main thread
+    final RootIsolateToken rootToken = RootIsolateToken.instance!;
+
     final inputData = NutritionPipelineInput(
       originalBytes: originalBytes,
       isAndroidPlatform: isAndroid,
     );
 
+/***WAS
     PlatformMemoryImageResult? imageResult = await Isolate.run(
       () => _runBackgroundEnhancements(inputData),
     );
+WAS***/
+//NEW Nov 3rd
+    // 2) PASS the rootToken to Isolate.run along with your function execution
+    PlatformMemoryImageResult? imageResult = await Isolate.run(
+      () {
+        // 3) CHECK FOR ENSURING INITIALIZATION right as the closure evaluates
+        BackgroundIsolateBinaryMessenger.ensureInitialized(rootToken);
+        return _runBackgroundEnhancements(inputData);
+      },
+    );
+//END of NEW
+
 
     if (imageResult == null) throw Exception("Image processing failed.");
 
