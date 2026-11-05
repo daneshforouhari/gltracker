@@ -398,45 +398,19 @@ class NutritionScanner {
       isAndroidPlatform: isAndroid,
     );
 
-/***WAS
-    PlatformMemoryImageResult? imageResult = await Isolate.run(
-      () => _runBackgroundEnhancements(inputData),
-    );
-WAS***/
-//NEW Nov 3rd
     // 2) PASS the rootToken to Isolate.run along with your function execution
-    PlatformMemoryImageResult? imageResult = await Isolate.run(
+    InputImage? inputImage = await Isolate.run(
       () {
         // 3) CHECK FOR ENSURING INITIALIZATION right as the closure evaluates
         BackgroundIsolateBinaryMessenger.ensureInitialized(rootToken);
         return _runBackgroundEnhancements(inputData);
       },
     );
-//END of NEW
 
-
-    if (imageResult == null) throw Exception("Image processing failed.");
+    if (inputImage == null) throw Exception("Image processing failed.");
 
 /***WAS
-    // 2. Map the bytes using the precise format required by the host operating system
-    final metadata = InputImageMetadata(
-      size: Size(imageResult.width.toDouble(), imageResult.height.toDouble()),
-      rotation: InputImageRotation.rotation0deg, 
-      format: isAndroid ? InputImageFormat.nv21 : InputImageFormat.bgra8888, 
-      // Use the native stride, or fallback to standard width * 4 if null
-      bytesPerRow: isAndroid 
-          ? imageResult.width 
-          : (imageResult.iosBytesPerRow ?? imageResult.width * 4),
-        );
-
-    final inputImage = InputImage.fromBytes(
-      bytes: imageResult.platformBytes,
-      metadata: metadata,
-    );
 WAS***/
-    // Bypasses cross-platform raw byte channel serialization restrictions entirely
-    final inputImage = InputImage.fromFilePath(imageResult.imagePath);
-
     final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
     final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
     await textRecognizer.close();
@@ -670,27 +644,14 @@ class NutritionPipelineInput {
 }
 
 class PlatformMemoryImageResult {
-  final int width;
-  final int height;
-/***WAS
-  final Uint8List platformBytes;
-  final int? iosBytesPerRow; // 👈 Add this optional field
-WAS***/
-  final String imagePath;
+  final String? imagePath;       // Used by iOS
+  final Uint8List? bytesInMemory; // Used by Android
 
-  PlatformMemoryImageResult({
-    required this.width, 
-    required this.height,
-/***WAS
-    required this.platformBytes, 
-    this.iosBytesPerRow, // 👈 Include it in the constructor
-WAS***/
-    required this.imagePath, 
-  });
+  PlatformMemoryImageResult({this.imagePath, this.bytesInMemory});
 }
 
 /// Runs entirely on a separate background thread core
-Future<PlatformMemoryImageResult?> _runBackgroundEnhancements(NutritionPipelineInput input) async {
+Future<InputImage?> _runBackgroundEnhancements(NutritionPipelineInput input) async {
   img.Image? workingImage = img.decodeImage(input.originalBytes);
   if (workingImage == null) return null;
 
@@ -753,7 +714,6 @@ Future<PlatformMemoryImageResult?> _runBackgroundEnhancements(NutritionPipelineI
 
 /***WAS
   // STEP E: Cross-Platform Conditional Allocation (100% in RAM)
-  Uint8List finalBytes;
   if (input.isAndroidPlatform) {
     finalBytes = _convertToNV21InMemory(workingImage);
   } else {
@@ -767,43 +727,43 @@ Future<PlatformMemoryImageResult?> _runBackgroundEnhancements(NutritionPipelineI
     iosBytesPerRow: workingImage.width * 4, 
   );
 WAS***/
-  // 1. Fetch the system's temporary directory
-  final tempDir = await getTemporaryDirectory();
-
-  // 2. Define a persistent target file path to avoid storage accumulation
-  final targetPath = '${tempDir.path}/gltracker_processed_scan.jpg';
-
-
-  // 3. Compress your raw processed bytes directly from RAM into a JPEG file on disk
   Uint8List processedBytes;
 
   if (input.isAndroidPlatform) {
-    // Keep your working Android pipeline exactly as it is
     processedBytes = _convertToNV21InMemory(workingImage);
+    // --- ANDROID PATH: Return the InputImage from bytes exactly how your old code did it ---
+    // Since this runs inside the isolate where you already have access to the width/height 
+    // or your original image matrix structures, build it right here:
+    final metaData = InputImageMetadata(
+      size: Size(workingImage.width.toDouble(), workingImage.height.toDouble()),
+      rotation: InputImageRotation.rotation0deg,
+      format: InputImageFormat.nv21,
+      bytesPerRow: workingImage.width,
+    );
+
+    return InputImage.fromBytes(
+      bytes: processedBytes,
+      metadata: metaData, // Use your exact working code line here
+    );
   } else {
-    // 👈 CHANGE FOR iOS: Encode to standard JPEG bytes directly from your matrix
-    // This bypasses the unaligned raw byte array entirely!
-    processedBytes = img.encodeJpg(workingImage, quality: 90); 
+    // --- iOS PATH: Only use compression here to fix native alignment/stride rejections ---
+    processedBytes = workingImage.toUint8List();
+    final Uint8List? imageResult = await FlutterImageCompress.compressWithList(
+      processedBytes,
+      minWidth: workingImage.width,
+      minHeight: workingImage.height,
+      quality: 90,
+      format: CompressFormat.jpeg,
+    );
+
+    if (imageResult == null) return null;
+
+    final directory = await getTemporaryDirectory();
+    final filePath = '${directory.path}/ios_ocr_processing_cache.jpg';
+    final file = File(filePath);
+    await file.writeAsBytes(imageResult, flush: true);
+    return InputImage.fromFilePath(file.path);
   }
-
-  final Uint8List? compressedBytes = await FlutterImageCompress.compressWithList(
-    processedBytes, // 👈 Uses your actual in-memory byte array variable
-    quality: 90,
-    format: CompressFormat.jpeg,
-  );
-
-  // 4. Safely dump the compressed JPEG bytes to the flash storage filesystem
-  if (compressedBytes != null) {
-    final tempFile = File(targetPath);
-    await tempFile.writeAsBytes(compressedBytes);
-  }
-
-  // 5. Return the packaged file path out to the main UI thread
-  return PlatformMemoryImageResult(
-    width: workingImage.width,
-    height: workingImage.height,
-    imagePath: targetPath, // 👈 Send the absolute path out
-  );
 }
 
 /// Converts a grayscale img.Image to NV21 bytes directly in RAM (Android Only)
