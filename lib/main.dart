@@ -747,16 +747,24 @@ WAS***/
     );
   } else {
     // --- iOS PATH: Only use compression here to fix native alignment/stride rejections ---
-    processedBytes = workingImage.toUint8List();
+    // Convert the 1-channel grayscale matrix to 3-channel RGB so the native iOS encoder can read it
+    final rgbWorkingImage = workingImage.convert(numChannels: 3);
+    
+    processedBytes = rgbWorkingImage.toUint8List();
+    final iosWidth = rgbWorkingImage.width;
+    final iosHeight = rgbWorkingImage.height; // Fixed typo from 'isoHeight' to 'iosHeight'
     final Uint8List? imageResult = await FlutterImageCompress.compressWithList(
       processedBytes,
-      minWidth: workingImage.width,
-      minHeight: workingImage.height,
+      minWidth: iosWidth,
+      minHeight: iosHeight,
       quality: 90,
       format: CompressFormat.jpeg,
     );
 
-    if (imageResult == null) return null;
+    if (imageResult == null) {
+      print("iOS Compression Error: Encoder returned null: bytes=${processedBytes} width=${iosWidth} height=${iosHeight}");
+      return null;
+    }
 
     final directory = await getTemporaryDirectory();
     final filePath = '${directory.path}/ios_ocr_processing_cache.jpg';
