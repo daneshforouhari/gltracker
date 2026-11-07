@@ -53,7 +53,7 @@ import 'package:syncfusion_flutter_gauges/gauges.dart';
 
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
-import 'package:flutter_image_compress/flutter_image_compress.dart';
+//import 'package:flutter_image_compress/flutter_image_compress.dart';
 
 late List<CameraDescription> _cameras;
 
@@ -747,30 +747,23 @@ WAS***/
     );
   } else {
     // --- iOS PATH: Only use compression here to fix native alignment/stride rejections ---
-    // Convert the 1-channel grayscale matrix to 3-channel RGB so the native iOS encoder can read it
-    final rgbWorkingImage = workingImage.convert(numChannels: 3);
-    
-    processedBytes = rgbWorkingImage.toUint8List();
-    final iosWidth = rgbWorkingImage.width;
-    final iosHeight = rgbWorkingImage.height; // Fixed typo from 'isoHeight' to 'iosHeight'
-    final Uint8List? imageResult = await FlutterImageCompress.compressWithList(
-      processedBytes,
-      minWidth: iosWidth,
-      minHeight: iosHeight,
-      quality: 90,
-      format: CompressFormat.jpeg,
-    );
+    try {
+      // Use the image package's built-in encoder to convert your matrix to a real JPEG buffer.
+      // This bypasses all native iOS row stride and channel limitations completely.
+      final Uint8List pureDartJpegBytes = img.encodeJpg(workingImage, quality: 90);
 
-    if (imageResult == null) {
-      print("iOS Compression Error: Encoder returned null: bytes=${processedBytes} width=${iosWidth} height=${iosHeight}");
+      final directory = await getTemporaryDirectory();
+      final filePath = '${directory.path}/ios_ocr_processing_cache.jpg';
+      final file = File(filePath);
+  
+      // Write the clean, fully-stamped JPEG file out to disk
+      await file.writeAsBytes(pureDartJpegBytes, flush: true);
+  
+      return InputImage.fromFilePath(file.path);
+    } catch (iosEncodeError) {
+      print("Pure Dart JPEG encoding failed on iOS: $iosEncodeError");
       return null;
     }
-
-    final directory = await getTemporaryDirectory();
-    final filePath = '${directory.path}/ios_ocr_processing_cache.jpg';
-    final file = File(filePath);
-    await file.writeAsBytes(imageResult, flush: true);
-    return InputImage.fromFilePath(file.path);
   }
 }
 
