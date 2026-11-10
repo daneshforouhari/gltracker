@@ -1,5 +1,7 @@
 /*
- * Nov 2, 2026
+ * Nov 9, 2026
+ * This version of the code is the first (cleaned up) version that works on iOS
+ * It also display 'Always consult with ...' 
  * Since none of the earlier code changes fixed the iOS image handling, we are
  * going to try file-based approach for storing the image file
  * This version still had issues with iOS capturing an image:
@@ -79,7 +81,7 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// --- UPDATED HOME PAGE (Now tracks and displays the OCR result) ---
+// UPDATED HOME PAGE (Now tracks and displays the OCR result)
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -92,7 +94,6 @@ typedef DisplayInfo = (String , Color, double);
 
 class _HomePageState extends State<HomePage> {
 
-  //String _ocrDisplayResult = "No label scanned yet. Tap the button below to start.";
   DisplayInfo _ocrDisplayResult = ('Tap the button below to scan.', Colors.white, 0.0);
 
   Future<void> _navigateToScanner() async {
@@ -196,16 +197,14 @@ END***/
                 color: Colors.grey.shade50,
                 child: Padding(
                   padding: const EdgeInsets.all(12.0),
-                  //child: SizedBox.expand(
-                    child: AutoSizeText(
-                      _ocrDisplayResult.$1,
-                      style: TextStyle(fontSize:MediaQuery.of(context).size.width * 0.05, color:_ocrDisplayResult.$2, fontWeight:FontWeight.bold),
-                      minFontSize: 10,
-                      stepGranularity: 1,
-                      maxLines: dynamicMaxLines,
-                      overflow: TextOverflow.ellipsis, //fallback if it still won't fit at minFontSize
-                    ),
-                  //),
+                  child: AutoSizeText(
+                    _ocrDisplayResult.$1,
+                    style: TextStyle(fontSize:MediaQuery.of(context).size.width * 0.05, color:_ocrDisplayResult.$2, fontWeight:FontWeight.bold),
+                    minFontSize: 10,
+                    stepGranularity: 1,
+                    maxLines: dynamicMaxLines,
+                    overflow: TextOverflow.ellipsis, //fallback if it still won't fit at minFontSize
+                  ),
                 ),
               ),
             ),
@@ -409,8 +408,6 @@ class NutritionScanner {
 
     if (inputImage == null) throw Exception("Image processing failed.");
 
-/***WAS
-WAS***/
     final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
     final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
     await textRecognizer.close();
@@ -524,7 +521,7 @@ WAS***/
     }
     serving_info = "Serving size ${serving_size}";
 
-/***DOES NOT WORK
+/***FIX ME:
     print("WWWWW${lowerText}WWWW");
     //process calories
     //patterns to match: calories, calones, calorles, oalories, 0alories, cal0ries, caloies
@@ -616,8 +613,9 @@ END***/
 
        glText = "${serving_info}\n${cals_info}\n${fat_info}, ${carbs_info}, ${fiber_info}, ${protein_info}\n${status} Glycemic Load ${glVal}";
        if (status == 'Medium') {
-          glText = "$glText \nPair with fiber/protein food";
+          glText = "${glText}\nPair with fiber/protein food";
        }
+       glText = "${glText}\n\nAlways consult with your physician";
 
        /***DO WE NEED THIS? setState(() {
           _isProcessing = false;
@@ -712,28 +710,8 @@ Future<InputImage?> _runBackgroundEnhancements(NutritionPipelineInput input) asy
   // STEP D: Cylindrical Flattening
   workingImage = _applyCylindricalFlattening(workingImage);
 
-/***WAS
-  // STEP E: Cross-Platform Conditional Allocation (100% in RAM)
   if (input.isAndroidPlatform) {
-    finalBytes = _convertToNV21InMemory(workingImage);
-  } else {
-    finalBytes = workingImage.toUint8List();
-  }
-
-  return PlatformMemoryImageResult(
-    width: workingImage.width,
-    height: workingImage.height,
-    platformBytes: finalBytes,
-    iosBytesPerRow: workingImage.width * 4, 
-  );
-WAS***/
-  Uint8List processedBytes;
-
-  if (input.isAndroidPlatform) {
-    processedBytes = _convertToNV21InMemory(workingImage);
-    // --- ANDROID PATH: Return the InputImage from bytes exactly how your old code did it ---
-    // Since this runs inside the isolate where you already have access to the width/height 
-    // or your original image matrix structures, build it right here:
+    //Android: in-memory storage of the image pixels
     final metaData = InputImageMetadata(
       size: Size(workingImage.width.toDouble(), workingImage.height.toDouble()),
       rotation: InputImageRotation.rotation0deg,
@@ -741,12 +719,12 @@ WAS***/
       bytesPerRow: workingImage.width,
     );
 
+   final Uint8List  processedBytes = _convertToNV21InMemory(workingImage);
     return InputImage.fromBytes(
       bytes: processedBytes,
       metadata: metaData, // Use your exact working code line here
     );
-  } else {
-    // --- iOS PATH: Only use compression here to fix native alignment/stride rejections ---
+  } else { //iOS: need to store the image on disk
     try {
       // Use the image package's built-in encoder to convert your matrix to a real JPEG buffer.
       // This bypasses all native iOS row stride and channel limitations completely.
@@ -767,7 +745,7 @@ WAS***/
   }
 }
 
-/// Converts a grayscale img.Image to NV21 bytes directly in RAM (Android Only)
+/// Andorid only: Converts a grayscale img.Image to NV21 bytes directly in memory 
 Uint8List _convertToNV21InMemory(img.Image image) {
   final int w = image.width;
   final int h = image.height;
