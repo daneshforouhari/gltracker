@@ -1,5 +1,7 @@
 /*
- * Nov 9, 2026
+ * Nov 18, 2026
+ * Enchnaced some of the regexes (whihc fixed errors using RipVan Wafels)
+ * There are stil issues with OCR misspellings, missing characters,...
  * This version of the code is the first (cleaned up) version that works on iOS
  * It also display 'Always consult with ...' 
  * Since none of the earlier code changes fixed the iOS image handling, we are
@@ -42,7 +44,11 @@
  * - how to deal with OCR misspellings:  toal -> total and $3g -> 33g
  */
 
+
+import 'dart:core';
 import 'dart:math' as math;
+import 'dart:math';
+import 'dart:ui';
 import 'dart:isolate';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -55,7 +61,6 @@ import 'package:syncfusion_flutter_gauges/gauges.dart';
 
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
-//import 'package:flutter_image_compress/flutter_image_compress.dart';
 
 late List<CameraDescription> _cameras;
 
@@ -79,6 +84,16 @@ class MyApp extends StatelessWidget {
       home: const HomePage(),
     );
   }
+}
+
+class SpatialRow {
+  Rect boundingBox;
+  final List<TextLine> lines;
+
+  SpatialRow({
+    required this.boundingBox,
+    required this.lines,
+  });
 }
 
 // UPDATED HOME PAGE (Now tracks and displays the OCR result)
@@ -342,10 +357,6 @@ class _FramingPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
-
-//PART 2
-// --- CROSS-PLATFORM IN-MEMORY PIPELINE ---
-
 num getAmount(String first_word, [bool trailing_g = true ] ) {
   /* if the amount of nutrient is less than 1, the label could have
    * some text like this:  Total Carb. less than 1g.
@@ -384,6 +395,46 @@ num getAmount(String first_word, [bool trailing_g = true ] ) {
   return amount;
 }
 
+/***WAS
+num getAmount(String first_word, [bool trailing_g = true ] ) {
+  /* if the amount of nutrient is less than 1, the label could have
+   * some text like this:  Total Carb. less than 1g.
+   * Check for misspellings for 'less', and if found, return 1.
+   */
+  final RegExp _LessRegex = RegExp(r'\b[l1i]e[s5\$]{1,2}(?!\w)');
+  //print("XXXXXfirst_word=X${first_word}X");
+  if (_LessRegex.hasMatch(first_word)) {
+    return 1;
+  }
+
+  String num_str;
+  num amount = -1;
+
+  Match? token_match = RegExp(r'^\d+(?:\.\d+)?\D+').firstMatch(first_word);
+
+  //look for a nummeric value followed by one or more non-digit chars, e.g. '0.5gx.' due to OCR
+  if (token_match != null) {
+    //extract the number from the beginning of the token
+    Match? num_match = RegExp(r'^\d+(?:\.\d+)?').firstMatch(token_match.group(0)?? " ");
+    num_str = num_match?.group(0) ?? " ";
+    amount = num.parse(num_str);
+  } else { //invalid token due to OCR
+    Match? invalid_token = RegExp(r'^\d+(?:\.\d+)?').firstMatch(first_word);
+    if (invalid_token != null) { //invalid token is a number
+      num_str = invalid_token.group(0)!;
+        //If the number has more than one digit and the last digit is a '9','0','6', or '8',
+        //chances are the last digit was actually a 'g' which got misspelled by OCR.
+      if ( num_str.length > 1 && trailing_g == true && '90684'.contains(num_str[num_str.length - 1]) ) {
+        amount = num.parse(num_str.substring(0, num_str.length-1));
+      } else {
+        amount = num.parse(num_str);
+      }
+    }
+  }
+  return amount;
+}
+WAS***/
+
 class NutritionScanner {
   /// Entry point to pass bytes directly to the cross-platform background processing pipeline
   Future<DisplayInfo> analyzeBytes(Uint8List originalBytes) async {
@@ -413,6 +464,7 @@ class NutritionScanner {
     await textRecognizer.close();
 
     String glText = ""; Color glTextColor = Colors.white; double glVal = 0.0;
+    final debug_ocr = true;
 
     if (recognizedText.text.isEmpty) {
       //DO WE NEED THIS? setState(() {
@@ -422,21 +474,263 @@ class NutritionScanner {
         glVal = 0.0;
        //END });
        return (glText, glTextColor, glVal);
+    };
+
+//if (debug_ocr == true) {
+
+List<List<TextLine>> groupLinesIntoRowsWithIoU(
+  RecognizedText visionText, {
+  double overlapThreshold = 0.45, // Requires at least 45% vertical overlap
+}) {
+  // 1. Flatten all lines from all blocks
+  final allLines = visionText.blocks.expand((block) => block.lines).toList();
+  if (allLines.isEmpty) return [];
+
+  // 2. Sort by the top coordinate to process top-to-bottom
+  final sortedLines = List<TextLine>.from(allLines)
+    ..sort((a, b) => a.boundingBox.top.compareTo(b.boundingBox.top));
+
+  final List<SpatialRow> rows = [];
+
+  for (final line in sortedLines) {
+    final box = line.boundingBox;
+    bool placed = false;
+
+    // 3. Check if this line vertically overlaps enough with an existing row
+    for (final row in rows) {
+      final rowBox = row.boundingBox;
+
+      // Calculate the vertical intersection bounds
+      final double intersectionTop = max(box.top, rowBox.top);
+      final double intersectionBottom = min(box.bottom, rowBox.bottom);
+      final double intersectionHeight = max(0.0, intersectionBottom - intersectionTop);
+
+      if (intersectionHeight > 0) {
+        // Calculate the vertical union height
+        final double unionTop = min(box.top, rowBox.top);
+        final double unionBottom = max(box.bottom, rowBox.bottom);
+        final double unionHeight = unionBottom - unionTop;
+
+        // Vertical Intersection over Union (vIoU)
+        final double vIoU = intersectionHeight / unionHeight;
+
+        if (vIoU >= overlapThreshold) {
+          row.lines.add(line);
+          // Expand the row's bounding box to encompass the new line
+          row.boundingBox = rowBox.expandToInclude(box);
+          placed = true;
+          break;
+        }
+      }
     }
 
+    // Create a new row if it didn't fit existing ones
+    if (!placed) {
+      rows.add(SpatialRow(boundingBox: box, lines: [line]));
+    }
+  }
+ // 4. Sort each row horizontally from left to right
+  return rows.map((row) {
+    return List<TextLine>.from(row.lines)
+      ..sort((a, b) => a.boundingBox.left.compareTo(b.boundingBox.left));
+  }).toList();
+
+}
+    
+    final StringBuffer combinedText = StringBuffer();
+final stopwatch = Stopwatch()..start();
+    final llt = groupLinesIntoRowsWithIoU(recognizedText);
+stopwatch.stop();
+print('####STOPWATCH: Elapsed (Duration): ${stopwatch.elapsed}');
+print('####STOPWATCH: Elapsed (ms): ${stopwatch.elapsedMilliseconds} ms');
+print('####STOPWATCH: Elapsed (μs): ${stopwatch.elapsedMicroseconds} μs');
+    for (int i = 0; i < llt.length; i++) {
+      for (int j = 0; j < llt[i].length; j++) {
+        print('=====>Row $i, Col $j: ${llt[i][j].text}');
+        combinedText.write('${llt[i][j].text} ');
+      }
+    };
+/***WAS
     final StringBuffer combinedText = StringBuffer();
     for (TextBlock block in recognizedText.blocks) {
       for (TextLine line in block.lines) {
         combinedText.write('${line.text} ');
       }
     }
+***/
 
     String lowerText = combinedText.toString().replaceAll(RegExp(r'\s+'), ' ').trim().toLowerCase();
     print("XXXX${lowerText}XXXX\n");
+//NEW
+        //correcting OCR mistakes
+        //final sizeRegex =  RegExp(r'\b[s5z2][i1l|!][zr2s5][e3c]\b');
+        final sizeRegex =  RegExp(r'\b[s5z2][i1l|!]*[zr2s5][e3c]\b');
+        final fatRegex = RegExp(r'\b[fep][a4o]t\b');
 
+        const String standardTotal = r'[t1ilrf][o0aqc][t1ilrf][aoeik][l1it]';
+   
+        //matches the specific 4-letter compressed "ptal" variant safely
+        const String compressedPtal = r'(?!pr[ou])p[t1ilrf][aoeik][l1it]';
+
+        //combine them with an OR (|) group
+        final totalRegex = RegExp(
+          r'\b(?!pr)(?:' + standardTotal + '|' + compressedPtal + r')\b',
+          caseSensitive: false,
+        );
+
+        final servingRegex = RegExp(r'\b(seving|sserving|erving)');
+        final caloriesRegex = RegExp(r'\b[ceog\(]?a[l1i|][o0ce](?:ri|n|m)[e3c]s?\b');
+   
+        final dietaryRegex = RegExp(r'\b[dcl0o][l1i|][e3c][t7f][a@o][r][yv]\b');
+        final fiberRegex = RegExp(r' [fep][i1l|t]?[bh6nvp][eco0][rni1]');
+        final dietaryFiberRegex = RegExp(dietaryRegex.pattern + fiberRegex.pattern);
+
+        final carbRegex = RegExp(r'[cl0dog][a0o4e][rni1][bh6n]');
+
+        final gramRegex1 = RegExp(r'(cg|dg|og|ug)\b');
+        final gramRegex2 = RegExp(r'(lg|ig)\b');
+        final gramRegex3 = RegExp(r'(&g|tg|&o)\b');
+        final gramRegex4 = RegExp(r'(bg|sg)\b');
+        lowerText = lowerText
+                    .replaceFirst(sizeRegex, 'size')
+                    .replaceAll(RegExp(r'\(|\)|%|,|\[|\]|{|}'), ' ')
+                    .replaceAll(RegExp(r'\s{2,}'), ' ')
+                    .replaceAll(servingRegex, 'serving')
+                    .replaceAll(caloriesRegex, 'calories')
+                    .replaceAll('thsp', 'tbsp')
+                    .replaceAll('omg', '0mg')
+                    .replaceAll('oml', '0ml')
+                    .replaceAll('gg', '9g')
+                    .replaceAll(gramRegex1, '0g')
+                    .replaceAll(gramRegex2, '1g')
+                    .replaceAll(gramRegex3, '8g')
+                    .replaceAll(gramRegex4, '6g')
+                    .replaceAll(totalRegex, 'total')
+                    .replaceAll(fatRegex, 'fat')
+                    .replaceFirst(carbRegex, 'carb')
+                    .replaceFirst(dietaryFiberRegex, 'dietaryfiber')
+                    ;
+
+        print("\nZZZZ${lowerText.substring(4, lowerText.length-4)}ZZZZ");
+
+        RegExp delimiters = RegExp(r' ');
+        RegExp pat =  RegExp(r'$^'); //no match
+        RegExpMatch? match = null;
+
+        String serving_info = 'Serving size not found';
+        num cals = -1; String cals_info = '';
+        num fat = -1; String fat_info = '';
+        num carbs = -1; String carbs_info = '';
+        num fiber = -1; String fiber_info = '';
+        num protein = -1; String protein_info = '';
+   
+        //process serving size
+        String serving_size = "not found";
+        pat = RegExp(r'serv(.*) size');
+        match = pat.firstMatch(lowerText);
+   
+        if (match != null) {
+          String rest = lowerText.substring(match.end);
+          /*
+           split the rest of string
+           extract splitted[3]
+           if the last char of splitted[3] is '9|0|6|8', replace it with a 'g'
+           serving_info = splitted[1]+splitted[2]+splitted[3]
+          */
+          List<String> splitted = rest.split(delimiters);
+          print("@@@@@@@@@@splitted[0]=X${splitted[0]}X");
+          print("@@@@@@@@@@splitted[1]=X${splitted[1]}X");
+          print("@@@@@@@@@@splitted[2]=X${splitted[2]}X");
+          print("@@@@@@@@@@splitted[3]=X${splitted[3]}X");
+          if ('90684'.contains(splitted[3][splitted[3].length-1])) {
+            serving_size = splitted[3].replaceRange(splitted[3].length-1, null, "g");
+          } else {
+            serving_size = splitted[3];
+          }
+          if (RegExp(r'^\d+').firstMatch(serving_size) == null) {
+            //if serving size token is missing, serving_size gets set to a non-numeric string
+            serving_size = "not found";
+          } else {
+            //the serving sz could be in 'g' or 'mL'. We can't tell the if the  unit is missing due to OCR
+            //serving_size = "${splitted[1]} ${splitted[2]} (${serving_size})";
+            //splitted1 & 2 could be misspeled due to OCR
+            serving_size = "${serving_size}";
+          }
+        }
+        serving_info = "Serving size ${serving_size}";
+        //process calories
+        //patterns to match: calories, calones, calorles, oalories, 0alories, cal0ries, caloies
+        pat = RegExp(r'\b[co0]al.{2,4}es?\b');
+        match = pat.firstMatch(lowerText);
+        if (match != null) {
+          String rest = lowerText.substring(match.end);
+          String first_word = rest.split(delimiters)[1];
+          cals = getAmount(first_word, false); //no trailing g
+          //print("XXXXXrest=Y${rest}Y first_word=Z${first_word}Z");
+        }
+        cals_info = 'Calories ${cals}';
+
+        //process carbs
+        pat = RegExp(r'total carb(\.|[a-z]*)|carbohidratos totales');
+        match = pat.firstMatch(lowerText);
+        if (match != null) {
+          String rest = lowerText.substring(match.end);
+          String first_word = rest.split(delimiters)[1];
+          carbs = getAmount(first_word);
+        }
+        carbs_info = 'Carbs ${carbs}g';
+
+        //process fat
+        pat = RegExp(r'total fat|grasa total');
+        match = pat.firstMatch(lowerText);
+        if (match != null) {
+          String rest = lowerText.substring(match.end);
+
+          String first_word = rest.split(delimiters)[1]; //should be a number followed by 'g'
+          fat = getAmount(first_word);
+        }
+        fat_info = 'Fat ${fat}g';
+
+        //process protein
+        pat = RegExp(r'[fp1r][rni1][o0aqu][t1ilfh][eco0][i1l|t][nmht]');
+        match = pat.firstMatch(lowerText);
+        if (match != null) {
+          String rest = lowerText.substring(match.end);
+
+          String first_word = rest.split(delimiters)[1]; //should be a number followed by 'g'
+          //firstword must start with a number &  trailed by 'g', or junk char(s) due to OCR
+          protein = getAmount(first_word);
+        }
+        protein_info = 'Protein ${protein}g';
+
+       //process fiber
+        pat = RegExp(r'dietaryfiber');
+        match = pat.firstMatch(lowerText);
+        //if (match != null || ('fiber'.allMatches(lowerText)).length == 1) {
+        if (match != null) {
+          String rest = lowerText.substring(match.end);
+
+          String first_word = rest.split(delimiters)[1]; //should be a number followed by 'g'
+          //firstword must start with a number. The number could be trailed by 'g', or junk char(s) due to OCR
+          fiber = getAmount(first_word);
+        } else {
+          int index = lowerText.indexOf('fiber');
+          if (index != -1 && ('fiber'.allMatches(lowerText)).length == 1 ) {
+            String rest = lowerText.substring(index+'fiber'.length);
+
+            String first_word = rest.split(delimiters)[1]; //should be a number followed by 'g'
+            //firstword must start with a number. The number could be trailed by 'g', or junk char(s) due to OCR
+            fiber = getAmount(first_word);
+          }
+        }
+        fiber_info = 'Fiber ${fiber}g';
+
+
+
+/***WAS
     //correcting OCR mistakes
-    final RegExp _sizeRegex =  RegExp(r's.?ze+');
-    final RegExp _fatRegex = RegExp(r'\b[fep][a4o]t\b');
+    final sizeRegex =  RegExp(r'\b[s5z2][i1l|!][zr2s5][e3c]\b');
+    final fatRegex = RegExp(r'\b[fep][a4o]t\b');
 
     const String standardTotal = r'[t1ilrf][o0aqc][t1ilrf][aoeik][l1it]';
 
@@ -444,35 +738,43 @@ class NutritionScanner {
     const String compressedPtal = r'(?!pr[ou])p[t1ilrf][aoeik][l1it]';
 
     //combine them with an OR (|) group
-    final RegExp _totalRegex = RegExp(
+    final totalRegex = RegExp(
       r'\b(?!pr)(?:' + standardTotal + '|' + compressedPtal + r')\b',
       caseSensitive: false,
     );
 
-    final RegExp _servingRegex = RegExp(r'\b(seving|sserving|erving)');
-    final RegExp _fiberRegex = RegExp(r'[fep][i1l|t]?[bh6nvp][eco0][rni1]');
-    final RegExp _carbRegex = RegExp(r'[cl0dog][a0o4e][rni1][bh6n]');
-    final RegExp _gramRegex1 = RegExp(r'(cg|dg|og|ug)\b');
-    final RegExp _gramRegex2 = RegExp(r'(lg|ig)\b');
-    final RegExp _gramRegex3 = RegExp(r'(&g|tg|&o)\b');
+    final servingRegex = RegExp(r'\b(seving|sserving|erving)');
+    final caloriesRegex = RegExp(r'\b[ceog\(]?a[l1i|][o0ce](?:ri|n|m)[e3c]s?\b');
+
+    final dietaryRegex = RegExp(r'\b[dcl0o][l1i|][e3c][t7f][a@o][r][yv]\b');
+    final fiberRegex = RegExp(r' [fep][i1l|t]?[bh6nvp][eco0][rni1]');
+    final dietaryFiberRegex = RegExp(dietaryRegex.pattern + fiberRegex.pattern);
+
+    final carbRegex = RegExp(r'[cl0dog][a0o4e][rni1][bh6n]');
+
+    final gramRegex1 = RegExp(r'(cg|dg|og|ug)\b');
+    final gramRegex2 = RegExp(r'(lg|ig)\b');
+    final gramRegex3 = RegExp(r'(&g|tg|&o)\b');
+    final gramRegex4 = RegExp(r'(bg|sg)\b');
 
     lowerText = lowerText
-                .replaceFirst(_sizeRegex, 'size')
+                .replaceFirst(sizeRegex, 'size')
                 .replaceAll(RegExp(r'\(|\)|%|,|\[|\]|{|}'), ' ')
                 .replaceAll(RegExp(r'\s{2,}'), ' ')
-                .replaceAll(_servingRegex, 'serving')
+                .replaceAll(servingRegex, 'serving')
+                .replaceAll(caloriesRegex, 'calories')
                 .replaceAll('thsp', 'tbsp')
                 .replaceAll('omg', '0mg')
                 .replaceAll('oml', '0ml')
-                .replaceAll('bg', '6g')
                 .replaceAll('gg', '9g')
-                .replaceAll(_gramRegex1, '0g')
-                .replaceAll(_gramRegex2, '1g')
-                .replaceAll(_gramRegex3, '8g')
-                .replaceAll(_totalRegex, 'total')
-                .replaceAll(_fatRegex, 'fat')
-                .replaceFirst(_carbRegex, 'carb')
-                .replaceFirst(_fiberRegex, 'fiber')
+                .replaceAll(gramRegex1, '0g')
+                .replaceAll(gramRegex2, '1g')
+                .replaceAll(gramRegex3, '8g')
+                .replaceAll(gramRegex4, '6g')
+                .replaceAll(totalRegex, 'total')
+                .replaceAll(fatRegex, 'fat')
+                .replaceFirst(carbRegex, 'carb')
+                .replaceFirst(dietaryFiberRegex, 'dietaryfiber')
                 ;
 
     print("ZZZZ${lowerText}ZZZZ");
@@ -491,7 +793,8 @@ class NutritionScanner {
 
     //process serving size
     String serving_size = "not found";
-    pat = RegExp(r'serv(.*) size|tamaño de la porción');
+    //pat = RegExp(r'serv(.*) size|tamaño de la porción');
+    pat = RegExp(r'serv(.*) (size|s(.*)re)');
     match = pat.firstMatch(lowerText);
 
     if (match != null) {
@@ -521,8 +824,7 @@ class NutritionScanner {
     }
     serving_info = "Serving size ${serving_size}";
 
-/***FIX ME:
-    print("WWWWW${lowerText}WWWW");
+    //print("WWWWW${lowerText}WWWW");
     //process calories
     //patterns to match: calories, calones, calorles, oalories, 0alories, cal0ries, caloies
     pat = RegExp(r'\b[co0]al.{2,4}es?\b');
@@ -531,10 +833,9 @@ class NutritionScanner {
       String rest = lowerText.substring(match.end);
       String first_word = rest.split(delimiters)[1];
       cals = getAmount(first_word, false); //no trailing g
-      print("XXXXXrest=Y${rest}Y first_word=Z${first_word}Z");
+      //print("XXXXXrest=Y${rest}Y first_word=Z${first_word}Z");
     }
     cals_info = 'Calories ${cals}';
-END***/
 
     //process carbs
     pat = RegExp(r'carb(\.|[a-z]*)|carbohidratos totales');
@@ -570,7 +871,7 @@ END***/
     protein_info = 'Protein ${protein}g';
 
     //process fiber
-    pat = RegExp(r'fiber|Fibra');
+    pat = RegExp(r'dietaryfiber');
     match = pat.firstMatch(lowerText);
     if (match != null) {
       String rest = lowerText.substring(match.end);
@@ -580,6 +881,7 @@ END***/
       fiber = getAmount(first_word);
     }
     fiber_info = 'Fiber ${fiber}g';
+WAS***/
 
     if (protein < 0 || carbs < 0 || fat < 0 || fiber < 0) {
       List<String> invalidValues = [];
@@ -626,8 +928,6 @@ END***/
     return (glText, glTextColor, glVal);
   }
 }
-
-// --- DATA STRUCTURES & ISOLATE LOGIC ---
 
 class NutritionPipelineInput {
   final Uint8List originalBytes;
